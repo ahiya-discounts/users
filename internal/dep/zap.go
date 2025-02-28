@@ -14,7 +14,7 @@ func (f LogWrapper) Log(level log.Level, keyvals ...interface{}) error {
 	return f(level, keyvals...)
 }
 
-func NewZapLogger(bc *conf.Bootstrap) (log.Logger, error) {
+func GetZapLogger(bc *conf.Bootstrap) (*zap.Logger, error) {
 	env := bc.GetMetadata().GetEnv().String()
 	var cfg zap.Config
 	switch env {
@@ -33,6 +33,11 @@ func NewZapLogger(bc *conf.Bootstrap) (log.Logger, error) {
 		cfg.OutputPaths = append(cfg.OutputPaths, logfile)
 	}
 	logger, err := cfg.Build()
+	return logger, err
+}
+
+func NewZapLogger(bc *conf.Bootstrap) (log.Logger, error) {
+	logger, err := GetZapLogger(bc)
 	if err != nil {
 		return nil, err
 	}

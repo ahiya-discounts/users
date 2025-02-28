@@ -1,0 +1,21 @@
+version: "3.9"
+services:
+  users-db:
+    env_file:
+      - .env
+    image: postgres:16.6-alpine3.21
+    # container_name: users-db
+    hostname: users-db
+    environment:
+      POSTGRES_USER: ${USERS_DB_USER}
+      POSTGRES_PASSWORD: ${USERS_DB_PASS}
+      POSTGRES_DB: ${USERS_DB_NAME}
+    ports:
+      - "${USERS_DB_PORT}:5432"
+    volumes:
+      - ../db-data/users-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5

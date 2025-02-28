@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"users/internal/data"
 	"users/internal/dep"
 
 	"users/internal/conf"
@@ -58,9 +59,6 @@ func main() {
 	)
 	defer c.Close()
 
-	// migrate here
-	// data.Migrate()
-
 	if err := c.Load(); err != nil {
 		panic(err)
 	}
@@ -89,6 +87,8 @@ func main() {
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	data.Migrate(ctx, bc.Data, logger)
 
 	app, cleanup, err := wireApp(ctx, &bc, bc.Server, bc.Data, logger)
 	if err != nil {

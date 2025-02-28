@@ -1,60 +1,49 @@
 package data
 
 import (
+	"context"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"time"
 	"users/internal/conf"
 
+	"github.com/go-kratos/kratos/v2/errors"
 	"github.com/go-kratos/kratos/v2/log"
 	"github.com/google/wire"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"go.opentelemetry.io/otel"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
+	gormlogger "gorm.io/gorm/logger"
 )
 
 var ProviderSet = wire.NewSet(NewData, NewUsersRepo)
 
 type Data struct {
 	// TODO wrapped database client
-	// client *gorm.DB
+	client *gorm.DB
 }
 
-func NewData(c *conf.Data, logger log.Logger) (*Data, func(), error) {
-	cleanup := func() {
-		log.NewHelper(logger).Info("closing the data resources")
+func openDB(c *conf.Data, logger log.Logger) (*gorm.DB, error) {
+	dsn := c.Database.Source
+	if dsn == "" {
+		return nil, errors.InternalServer("data.openDB", "missing database source")
 	}
-	return &Data{}, cleanup, nil
-}
-
-/*
-
-var driver = os.Getenv("DRIVER")
-var host = os.Getenv("DB_HOST")
-var name = os.Getenv("DB_NAME")
-var port = os.Getenv("DB_PORT")
-var user = os.Getenv("DB_USER")
-var pass = os.Getenv("DB_PASS")
-var sslmode = os.Getenv("DB_SSLMODE")
-
-
-func verifyEnv(logger log.Logger) bool {
-	for _, v := range []string{driver, host, name, port, user, pass} {
-		if v == "" {
-			log.NewHelper(logger).Error("missing environment variable %s", v)
-			return false
-		}
+	driver := c.Database.Driver
+	if driver == "" {
+		return nil, errors.InternalServer("data.openDB", "missing database driver")
 	}
-	if sslmode == "" {
-		log.NewHelper(logger).Warn("missing environment variable DB_SSLMODE, using default value 'disable'")
-		sslmode = "disable"
-	}
-	return true
-}
 
-func getDSN() string {
-	return "host=" + host + " port=" + port + " user=" + user + " dbname=" + name + " password=" + pass + " sslmode=" + sslmode
-}
+	lg := NewZapGormAdapter(logger)
 
-func openDB() (*gorm.DB, error) {
 	db, err := gorm.Open(postgres.New(postgres.Config{
-		DSN:                  getDSN(),
+		DSN:                  dsn,
 		PreferSimpleProtocol: true, // disables implicit prepared statement usage
-	}), &gorm.Config{})
+
+	}), &gorm.Config{
+		Logger: lg,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -62,16 +51,12 @@ func openDB() (*gorm.DB, error) {
 }
 
 func NewData(c *conf.Data, logger log.Logger) (*Data, func(), error) {
-	if !verifyEnv(logger) {
-		return nil, nil, errors.New("missing environment variable")
-	}
-	client, err := openDB()
+	client, err := openDB(c, logger)
 	if err != nil {
 		return nil, nil, err
 	}
 	cleanup := func() {
 		log.NewHelper(logger).Info("closing the data resources")
-		//err := client.Close()
 		if err != nil {
 			log.NewHelper(logger).Error("failed closing the data resources: %v", err)
 		}
@@ -79,16 +64,63 @@ func NewData(c *conf.Data, logger log.Logger) (*Data, func(), error) {
 	return &Data{client}, cleanup, nil
 }
 
-func Migrate() {
-	log.NewHelper(log.DefaultLogger).Info("migrating the schema")
-	client, err := openDB()
+func Migrate(ctx context.Context, c *conf.Data, logger log.Logger) {
+	_, span := otel.Tracer("data").Start(ctx, "Migrate")
+	defer span.End()
+	log.NewHelper(logger).Info("migrating the schema")
+	client, err := openDB(c, logger)
 	if err != nil {
-		log.NewHelper(log.DefaultLogger).Error("failed opening database: %v", err)
+		log.NewHelper(logger).Error("failed opening database: %v", err)
 	}
 	err = client.AutoMigrate(&Users{})
 	if err != nil {
-		log.NewHelper(log.DefaultLogger).Error("failed migrating the schema: %v", err)
+		log.NewHelper(logger).Error("failed migrating the schema: %v", err)
+
 	}
 }
 
-*/
+type adaptedGormLogger struct {
+	logger *log.Helper
+}
+
+func NewZapGormAdapter(logger log.Logger) gormlogger.Interface {
+	lg := log.NewHelper(logger)
+	return &adaptedGormLogger{lg}
+}
+
+func (l *adaptedGormLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
+	return l
+}
+
+func (l *adaptedGormLogger) Info(ctx context.Context, msg string, data ...interface{}) {
+	args := make([]interface{}, 0, len(data)+1)
+	args = append(args, msg)
+	args = append(args, data...)
+	l.logger.Info(args...)
+}
+
+func (l *adaptedGormLogger) Warn(ctx context.Context, msg string, data ...interface{}) {
+	args := make([]interface{}, 0, len(data)+1)
+	args = append(args, msg)
+	args = append(args, data...)
+	l.logger.Warn(args...)
+}
+
+func (l *adaptedGormLogger) Error(ctx context.Context, msg string, data ...interface{}) {
+	args := make([]interface{}, 0, len(data)+1)
+	args = append(args, msg)
+	args = append(args, data...)
+	l.logger.Error(args...)
+}
+
+func (l *adaptedGormLogger) Trace(ctx context.Context, begin time.Time, fc func() (sql string, rowsAffected int64), err error) {
+	_, span := otel.Tracer("gorm").Start(ctx, "Query")
+	defer span.End()
+	sql, rowsAffected := fc()
+	span.SetAttributes(attribute.String("db.system", "postgresql"))
+	span.SetAttributes(attribute.String("db.statement", sql))
+	span.SetAttributes(attribute.Int64("db.rows_affected", int64(rowsAffected)))
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+}
